@@ -40,7 +40,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./landing-page/Dockerfile
+          file: ./Dockerfile
           push: true
           tags: |
             ghcr.io/${{ steps.string.outputs.owner_lc }}/terminalgenerator:${{ github.run_number }}-${{ steps.vars.outputs.sha_short }}
