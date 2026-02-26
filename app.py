@@ -55,7 +55,6 @@ with st.sidebar:
     st.header("Database Overview")
     try:
         with engine.connect() as conn:
-            # 1. Create Registry Table
             conn.execute(text("""
                 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[terminal_registry]') AND type in (N'U'))
                 BEGIN
@@ -65,7 +64,6 @@ with st.sidebar:
                     )
                 END
             """))
-            # 2. Create Mapping Table
             conn.execute(text("""
                 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[terminal_mappings]') AND type in (N'U'))
                 BEGIN
@@ -90,7 +88,7 @@ with st.sidebar:
         st.write(f"Capacity: { (last_seq/max_cap)*100 :.2f}%")
         st.progress(min(last_seq / max_cap, 1.0))
     except Exception as e:
-        st.error(f"Database Connection/Schema Error: {e}")
+        st.error(f"Database Error: {e}")
 
 # --- PAGE 1: GENERATOR ---
 if page == "TID Generator":
@@ -144,12 +142,8 @@ if page == "TID Generator":
 # --- PAGE 2: MIGRATION ---
 elif page == "Data Migration":
     st.title(" Data Migration Module")
-    st.write("Upload an Excel or CSV file to import existing Terminal IDs into the database.")
+    st.write("Upload a file to import existing Terminal IDs into the registry.")
     
-    with st.expander("Required File Format"):
-        st.write("The file must contain at least these two columns:")
-        st.code("terminal_id, sequence_num")
-
     uploaded_file = st.file_uploader("Choose a file", type=['csv', 'xlsx'])
 
     if uploaded_file:
@@ -158,40 +152,44 @@ elif page == "Data Migration":
             st.write("### Preview of Uploaded Data")
             st.dataframe(df_mig.head(10))
 
-            if st.button("Confirm and Import to MS SQL", type="primary", use_container_width=True):
-                required = {'terminal_id', 'sequence_num'}
-                if not required.issubset(df_mig.columns):
-                    st.error(f"Missing columns! Required: {required}")
-                else:
-                    with st.spinner("Writing to Database..."):
-                        df_mig.to_sql('terminal_registry', engine, if_exists='append', index=False)
-                    st.success(f"Successfully migrated {len(df_mig)} records!")
-                    st.balloons()
+            if st.button("Confirm and Import to Registry", type="primary", use_container_width=True):
+                # We only want terminal_id and sequence_num for the Registry table
+                df_to_save = df_mig[['terminal_id', 'sequence_num']].copy()
+                
+                with st.spinner("Writing to Registry..."):
+                    df_to_save.to_sql('terminal_registry', engine, if_exists='append', index=False)
+                st.success(f"Successfully migrated {len(df_to_save)} records!")
+                st.balloons()
         except Exception as e:
             st.error(f"Migration Error: {e}")
 
 # --- PAGE 3: UPLOAD MAPPINGS ---
 elif page == "Upload Mappings":
     st.title(" Upload Client Mappings")
-    st.write("Upload the feedback file from the institution to link generated TIDs to their specific MIDs and business details.")
-    
-    with st.expander("Expected Excel/CSV Columns"):
-        st.write("The file should include: `terminal_id`, `institution`, `product_type`, `mid`, `client_tid`")
+    st.write("Upload the institution feedback file to link TIDs to MIDs.")
 
     uploaded_file = st.file_uploader("Upload Client Feedback File", type=['csv', 'xlsx'])
     if uploaded_file:
         try:
             df_map = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+            
+            # Normalize column names to match DB
+            df_map.columns = [c.lower().replace(" ", "_").strip() for c in df_map.columns]
+            
             st.write("### Mapping Preview")
             st.dataframe(df_map.head())
 
             if st.button("Save Client Mappings", type="primary", use_container_width=True):
-                # Standardize headers (strip spaces, lowercase) to match SQL table
-                df_map.columns = [c.lower().replace(" ", "_").strip() for c in df_map.columns]
+                # FIX: Explicitly select ONLY the columns that exist in the terminal_mappings table
+                # This prevents the "Invalid column name 'sequence_num'" error
+                valid_columns = ['terminal_id', 'institution', 'product_type', 'mid', 'client_tid']
+                
+                # Only keep columns that actually exist in the uploaded file and are valid for the DB
+                cols_to_keep = [c for c in valid_columns if c in df_map.columns]
+                df_to_save = df_map[cols_to_keep].copy()
                 
                 with st.spinner("Syncing mappings to SQL Server..."):
-                    # if_exists='append' allows adding multiple batches from different clients
-                    df_map.to_sql('terminal_mappings', engine, if_exists='append', index=False)
+                    df_to_save.to_sql('terminal_mappings', engine, if_exists='append', index=False)
                 st.success(" Client mappings linked successfully!")
         except Exception as e:
             st.error(f"Mapping Upload Failed: {e}")
@@ -202,7 +200,6 @@ elif page == "Registry Search":
     search_tid = st.text_input("Enter Terminal ID (TID) to find details:").strip()
     
     if search_tid:
-        # Join registry and mappings to show the full picture
         query = text("""
             SELECT r.terminal_id, r.sequence_num, m.institution, m.product_type, m.mid, m.client_tid
             FROM terminal_registry r
@@ -220,12 +217,12 @@ elif page == "Registry Search":
                 st.write(f"**Sequence:** {result[1]}")
             with res_col2:
                 st.subheader(" Client Mapping")
-                if result[2]: # If institution is not null
+                if result[2]:
                     st.write(f"**Institution:** {result[2]}")
                     st.write(f"**Product:** {result[3]}")
                     st.write(f"**MID:** {result[4]}")
                     st.write(f"**Client TID:** {result[5]}")
                 else:
-                    st.info("No client mapping data has been uploaded for this ID yet.")
+                    st.info("No client mapping data found for this ID.")
         else:
-            st.error("This Terminal ID does not exist in the registry.")
+            st.error("Terminal ID not found in registry.")
