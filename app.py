@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import string
 import os
+import pyodbc  # Added for the raw connection creator
 from sqlalchemy import create_engine, text
-from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,28 +15,30 @@ CHAR_SET = string.digits + string.ascii_lowercase
 BASE = len(CHAR_SET)
 
 # --- MS SQL Connection Logic ---
-DB_USER = os.getenv("MSSQL_USER")
-# Updated to match your latest .env variable name
-DB_PASS = os.getenv("MSSQL_PASS") 
-DB_HOST = os.getenv("MSSQL_HOST")
-DB_PORT = os.getenv("MSSQL_PORT", "1433")
-DB_NAME = os.getenv("MSSQL_DB")
+def get_mssql_connection():
+    """
+    Directly creates a pyodbc connection to bypass SQLAlchemy/URL encoding issues
+    with special characters in passwords (+, =, #).
+    """
+    user = os.getenv("MSSQL_USER")
+    password = os.getenv("MSSQL_PASS")
+    host = os.getenv("MSSQL_HOST")
+    port = os.getenv("MSSQL_PORT", "1433")
+    database = os.getenv("MSSQL_DB")
 
-# Updated connection string:
-# 1. Switched Encrypt to 'no' to match your working JDBC/PGAuth strings.
-# 2. Ensures standard ODBC Driver 18 syntax.
-params = quote_plus(
-    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-    f"SERVER={DB_HOST},{DB_PORT};"
-    f"DATABASE={DB_NAME};"
-    f"UID={DB_USER};"
-    f"PWD={DB_PASS};"
-    f"Encrypt=no;"
-    f"TrustServerCertificate=yes;"
-)
+    conn_str = (
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+        f"SERVER={host},{port};"
+        f"DATABASE={database};"
+        f"UID={user};"
+        f"PWD={password};"
+        f"Encrypt=no;"  # Matches your working infrastructure
+        f"TrustServerCertificate=yes;"
+    )
+    return pyodbc.connect(conn_str)
 
-DB_URL = f"mssql+pyodbc:///?odbc_connect={params}"
-engine = create_engine(DB_URL, fast_executemany=True)
+# Create the engine using the 'creator' parameter
+engine = create_engine("mssql+pyodbc://", creator=get_mssql_connection, fast_executemany=True)
 
 def int_to_base36_padded(num):
     if num == 0: return "0".zfill(SUFFIX_LENGTH).upper()
@@ -56,18 +58,15 @@ with st.sidebar:
     st.header("Database Overview")
     try:
         with engine.connect() as conn:
-            # Use specific table name from your registry context
             total = conn.execute(text("SELECT COUNT(*) FROM terminal_registry")).scalar()
             last_seq = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar() or 0
         st.metric("Total TIDs Generated", f"{total:,}")
         st.metric("Current Sequence", last_seq)
         
-        # Progress to Max Capacity
         max_cap = (BASE ** SUFFIX_LENGTH)
         st.write(f"Capacity: { (last_seq/max_cap)*100 :.2f}%")
         st.progress(min(last_seq / max_cap, 1.0))
     except Exception as e:
-        # Improved error reporting for debugging
         st.error(f"Could not connect to MS SQL: {e}")
 
 # --- Frontend Batch Control ---
@@ -110,7 +109,6 @@ if st.button(" Generate and Save Batch", type="primary"):
 
         if new_rows:
             df = pd.DataFrame(new_rows)
-            # Batch insert
             df.to_sql('terminal_registry', engine, if_exists='append', index=False)
             st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
             st.dataframe(df.head(100))
