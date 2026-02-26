@@ -58,8 +58,23 @@ with st.sidebar:
     st.header("Database Overview")
     try:
         with engine.connect() as conn:
+            # --- BOOTSTRAP: Create Table if it doesn't exist ---
+            # This prevents the 'Invalid object name' error on first run
+            conn.execute(text("""
+                IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[terminal_registry]') AND type in (N'U'))
+                BEGIN
+                    CREATE TABLE terminal_registry (
+                        terminal_id VARCHAR(20) PRIMARY KEY,
+                        sequence_num INT NOT NULL
+                    )
+                END
+            """))
+            conn.commit()
+
+            # Now fetch stats
             total = conn.execute(text("SELECT COUNT(*) FROM terminal_registry")).scalar()
             last_seq = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar() or 0
+            
         st.metric("Total TIDs Generated", f"{total:,}")
         st.metric("Current Sequence", last_seq)
         
@@ -67,7 +82,7 @@ with st.sidebar:
         st.write(f"Capacity: { (last_seq/max_cap)*100 :.2f}%")
         st.progress(min(last_seq / max_cap, 1.0))
     except Exception as e:
-        st.error(f"Could not connect to MS SQL: {e}")
+        st.error(f"Database Connection/Schema Error: {e}")
 
 # --- Frontend Batch Control ---
 st.subheader("Generation Settings")
@@ -109,6 +124,7 @@ if st.button(" Generate and Save Batch", type="primary"):
 
         if new_rows:
             df = pd.DataFrame(new_rows)
+            # Batch insert to existing (or newly bootstrapped) table
             df.to_sql('terminal_registry', engine, if_exists='append', index=False)
             st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
             st.dataframe(df.head(100))
