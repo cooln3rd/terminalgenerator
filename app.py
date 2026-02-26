@@ -59,7 +59,6 @@ with st.sidebar:
     try:
         with engine.connect() as conn:
             # --- BOOTSTRAP: Create Table if it doesn't exist ---
-            # This prevents the 'Invalid object name' error on first run
             conn.execute(text("""
                 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[terminal_registry]') AND type in (N'U'))
                 BEGIN
@@ -86,7 +85,11 @@ with st.sidebar:
 
 # --- Frontend Batch Control ---
 st.subheader("Generation Settings")
-col1, col2 = st.columns(2)
+
+# UI Improvement: Prefix and Format placed clearly at the top
+st.info(f"**Current Configuration:** Prefix: `{PREFIX}` | Format: `{PREFIX}XXXX` ")
+
+col1, col2 = st.columns([1, 1])
 
 with col1:
     default_batch = int(os.getenv("BATCH_SIZE", 1000))
@@ -99,9 +102,11 @@ with col1:
     )
 
 with col2:
-    st.info(f"**Prefix:** {PREFIX} | **Format:** {PREFIX}XXXX")
+    # Adding vertical alignment spacers
+    st.write("###") 
+    generate_btn = st.button(" Generate and Save Batch", type="primary", use_container_width=True)
 
-if st.button(" Generate and Save Batch", type="primary"):
+if generate_btn:
     try:
         with engine.connect() as conn:
             res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
@@ -124,7 +129,6 @@ if st.button(" Generate and Save Batch", type="primary"):
 
         if new_rows:
             df = pd.DataFrame(new_rows)
-            # Batch insert to existing (or newly bootstrapped) table
             df.to_sql('terminal_registry', engine, if_exists='append', index=False)
             st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
             st.dataframe(df.head(100))
