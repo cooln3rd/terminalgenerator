@@ -16,12 +16,25 @@ BASE = len(CHAR_SET)
 
 # --- MS SQL Connection Logic ---
 DB_USER = os.getenv("MSSQL_USER")
-DB_PASS = os.getenv("MSSQL_PASSWORD")
+# Updated to match your latest .env variable name
+DB_PASS = os.getenv("MSSQL_PASS") 
 DB_HOST = os.getenv("MSSQL_HOST")
 DB_PORT = os.getenv("MSSQL_PORT", "1433")
 DB_NAME = os.getenv("MSSQL_DB")
 
-params = quote_plus(f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={DB_HOST},{DB_PORT};DATABASE={DB_NAME};UID={DB_USER};PWD={DB_PASS};Encrypt=yes;TrustServerCertificate=yes;")
+# Updated connection string:
+# 1. Switched Encrypt to 'no' to match your working JDBC/PGAuth strings.
+# 2. Ensures standard ODBC Driver 18 syntax.
+params = quote_plus(
+    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+    f"SERVER={DB_HOST},{DB_PORT};"
+    f"DATABASE={DB_NAME};"
+    f"UID={DB_USER};"
+    f"PWD={DB_PASS};"
+    f"Encrypt=no;"
+    f"TrustServerCertificate=yes;"
+)
+
 DB_URL = f"mssql+pyodbc:///?odbc_connect={params}"
 engine = create_engine(DB_URL, fast_executemany=True)
 
@@ -43,6 +56,7 @@ with st.sidebar:
     st.header("Database Overview")
     try:
         with engine.connect() as conn:
+            # Use specific table name from your registry context
             total = conn.execute(text("SELECT COUNT(*) FROM terminal_registry")).scalar()
             last_seq = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar() or 0
         st.metric("Total TIDs Generated", f"{total:,}")
@@ -52,15 +66,15 @@ with st.sidebar:
         max_cap = (BASE ** SUFFIX_LENGTH)
         st.write(f"Capacity: { (last_seq/max_cap)*100 :.2f}%")
         st.progress(min(last_seq / max_cap, 1.0))
-    except:
-        st.error("Could not connect to MS SQL.")
+    except Exception as e:
+        # Improved error reporting for debugging
+        st.error(f"Could not connect to MS SQL: {e}")
 
 # --- Frontend Batch Control ---
 st.subheader("Generation Settings")
 col1, col2 = st.columns(2)
 
 with col1:
-    # Use ENV value as default, but allow user to change it
     default_batch = int(os.getenv("BATCH_SIZE", 1000))
     selected_batch = st.number_input(
         "Enter Batch Size", 
@@ -74,36 +88,34 @@ with col2:
     st.info(f"**Prefix:** {PREFIX} | **Format:** {PREFIX}XXXX")
 
 if st.button(" Generate and Save Batch", type="primary"):
-    with engine.connect() as conn:
-        res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
-        current_id = res if res is not None else 0
+    try:
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
+            current_id = res if res is not None else 0
 
-    new_rows = []
-    progress_bar = st.progress(0)
-    
-    for i in range(selected_batch):
-        current_id += 1
-        if current_id > (BASE ** SUFFIX_LENGTH) - 1:
-            st.error("STOP: Maximum capacity for 4-character suffix reached!")
-            break
-            
-        tid = f"{PREFIX}{int_to_base36_padded(current_id)}"
-        new_rows.append({"terminal_id": tid, "sequence_num": current_id})
+        new_rows = []
+        progress_bar = st.progress(0)
         
-        # Update progress bar for large batches
-        if i % 1000 == 0:
-            progress_bar.progress(i / selected_batch)
+        for i in range(selected_batch):
+            current_id += 1
+            if current_id > (BASE ** SUFFIX_LENGTH) - 1:
+                st.error("STOP: Maximum capacity reached!")
+                break
+                
+            tid = f"{PREFIX}{int_to_base36_padded(current_id)}"
+            new_rows.append({"terminal_id": tid, "sequence_num": current_id})
+            
+            if i % 1000 == 0:
+                progress_bar.progress(i / selected_batch)
 
-    if new_rows:
-        df = pd.DataFrame(new_rows)
-        try:
-            # Batch insert to MS SQL
+        if new_rows:
+            df = pd.DataFrame(new_rows)
+            # Batch insert
             df.to_sql('terminal_registry', engine, if_exists='append', index=False)
             st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
-            st.dataframe(df.head(100)) # Show preview
+            st.dataframe(df.head(100))
             
-            # Export Option
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(" Download Batch as CSV", csv, f"TID_Batch_{current_id}.csv", "text/csv")
-        except Exception as e:
-            st.error(f"Error saving to database: {e}")
+            st.download_button(" Download Batch", csv, f"TID_Batch_{current_id}.csv", "text/csv")
+    except Exception as e:
+        st.error(f"Action failed: {e}")
