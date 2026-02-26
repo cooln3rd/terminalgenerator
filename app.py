@@ -86,10 +86,11 @@ with st.sidebar:
 # --- Frontend Batch Control ---
 st.subheader("Generation Settings")
 
-# UI Improvement: Prefix and Format placed clearly at the top
+# UI Improvement: Full-width info box at the top
 st.info(f"**Current Configuration:** Prefix: `{PREFIX}` | Format: `{PREFIX}XXXX` ")
 
-col1, col2 = st.columns([1, 1])
+# Use a narrower column for the input and button to keep it centered/organized
+col1, _ = st.columns([2, 3])
 
 with col1:
     default_batch = int(os.getenv("BATCH_SIZE", 1000))
@@ -100,11 +101,9 @@ with col1:
         value=default_batch,
         help="How many unique IDs do you want to generate in this run?"
     )
-
-with col2:
-    # Adding vertical alignment spacers
-    st.write("###") 
-    generate_btn = st.button(" Generate and Save Batch", type="primary", use_container_width=True)
+    
+    # Button is now directly under the input, spanning the same column width
+    generate_btn = st.button("Generate and Save Batch", type="primary", use_container_width=True)
 
 if generate_btn:
     try:
