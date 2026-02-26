@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import string
 import os
-import pyodbc  # Added for the raw connection creator
+import pyodbc
+import io
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
@@ -32,7 +33,7 @@ def get_mssql_connection():
         f"DATABASE={database};"
         f"UID={user};"
         f"PWD={password};"
-        f"Encrypt=no;"  # Matches your working infrastructure
+        f"Encrypt=no;"
         f"TrustServerCertificate=yes;"
     )
     return pyodbc.connect(conn_str)
@@ -49,12 +50,13 @@ def int_to_base36_padded(num):
         arr.append(CHAR_SET[rem])
     return "".join(reversed(arr)).upper().zfill(SUFFIX_LENGTH)
 
-# --- UI Setup ---
-st.set_page_config(page_title="Terminal Generator", layout="wide")
-st.title(" Terminal ID Generator")
+# --- Navigation ---
+st.set_page_config(page_title="Terminal Manager", layout="wide")
+page = st.sidebar.radio("Navigation", ["TID Generator", "Data Migration"])
 
-# Sidebar for DB Stats
+# --- Global Sidebar Stats ---
 with st.sidebar:
+    st.divider()
     st.header("Database Overview")
     try:
         with engine.connect() as conn:
@@ -70,12 +72,12 @@ with st.sidebar:
             """))
             conn.commit()
 
-            # Now fetch stats
+            # Fetch stats
             total = conn.execute(text("SELECT COUNT(*) FROM terminal_registry")).scalar()
             last_seq = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar() or 0
             
-        st.metric("Total TIDs Generated", f"{total:,}")
-        st.metric("Current Sequence", last_seq)
+        st.metric("Total TIDs in DB", f"{total:,}")
+        st.metric("Last Sequence", last_seq)
         
         max_cap = (BASE ** SUFFIX_LENGTH)
         st.write(f"Capacity: { (last_seq/max_cap)*100 :.2f}%")
@@ -83,56 +85,101 @@ with st.sidebar:
     except Exception as e:
         st.error(f"Database Connection/Schema Error: {e}")
 
-# --- Frontend Batch Control ---
-st.subheader("Generation Settings")
-
-# UI Improvement: Full-width info box at the top
-st.info(f"**Current Configuration:** Prefix: `{PREFIX}` | Format: `{PREFIX}XXXX` ")
-
-# Use a narrower column for the input and button to keep it centered/organized
-col1, _ = st.columns([2, 3])
-
-with col1:
-    default_batch = int(os.getenv("BATCH_SIZE", 1000))
-    selected_batch = st.number_input(
-        "Enter Batch Size", 
-        min_value=1, 
-        max_value=100000, 
-        value=default_batch,
-        help="How many unique IDs do you want to generate in this run?"
-    )
+# --- PAGE 1: GENERATOR ---
+if page == "TID Generator":
+    st.title(" Terminal ID Generator")
     
-    # Button is now directly under the input, spanning the same column width
-    generate_btn = st.button("Generate and Save Batch", type="primary", use_container_width=True)
+    # UI: Prefix and Format at the top
+    st.info(f"**Current Configuration:** Prefix: `{PREFIX}` | Format: `{PREFIX}XXXX` ")
 
-if generate_btn:
-    try:
-        with engine.connect() as conn:
-            res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
-            current_id = res if res is not None else 0
-
-        new_rows = []
-        progress_bar = st.progress(0)
+    col1, _ = st.columns([2, 3])
+    with col1:
+        default_batch = int(os.getenv("BATCH_SIZE", 1000))
+        selected_batch = st.number_input(
+            "Enter Batch Size", 
+            min_value=1, 
+            max_value=100000, 
+            value=default_batch,
+            help="How many unique IDs do you want to generate in this run?"
+        )
         
-        for i in range(selected_batch):
-            current_id += 1
-            if current_id > (BASE ** SUFFIX_LENGTH) - 1:
-                st.error("STOP: Maximum capacity reached!")
-                break
-                
-            tid = f"{PREFIX}{int_to_base36_padded(current_id)}"
-            new_rows.append({"terminal_id": tid, "sequence_num": current_id})
-            
-            if i % 1000 == 0:
-                progress_bar.progress(i / selected_batch)
+        generate_btn = st.button("Generate and Save Batch", type="primary", use_container_width=True)
 
-        if new_rows:
-            df = pd.DataFrame(new_rows)
-            df.to_sql('terminal_registry', engine, if_exists='append', index=False)
-            st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
-            st.dataframe(df.head(100))
+    if generate_btn:
+        try:
+            with engine.connect() as conn:
+                res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
+                current_id = res if res is not None else 0
+
+            new_rows = []
+            progress_bar = st.progress(0)
             
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(" Download Batch", csv, f"TID_Batch_{current_id}.csv", "text/csv")
-    except Exception as e:
-        st.error(f"Action failed: {e}")
+            for i in range(selected_batch):
+                current_id += 1
+                if current_id > (BASE ** SUFFIX_LENGTH) - 1:
+                    st.error("STOP: Maximum capacity reached!")
+                    break
+                    
+                tid = f"{PREFIX}{int_to_base36_padded(current_id)}"
+                new_rows.append({"terminal_id": tid, "sequence_num": current_id})
+                
+                if i % 1000 == 0:
+                    progress_bar.progress(i / selected_batch)
+
+            if new_rows:
+                df = pd.DataFrame(new_rows)
+                # Batch insert to MS SQL
+                df.to_sql('terminal_registry', engine, if_exists='append', index=False)
+                st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
+                
+                # --- Excel Export Logic ---
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Generated_TIDs')
+                
+                st.download_button(
+                    label=" Download Batch as Excel",
+                    data=buffer.getvalue(),
+                    file_name=f"TID_Batch_{current_id}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+                st.dataframe(df.head(100))
+        except Exception as e:
+            st.error(f"Action failed: {e}")
+
+# --- PAGE 2: MIGRATION ---
+elif page == "Data Migration":
+    st.title(" Data Migration Module")
+    st.write("Upload an Excel or CSV file to import existing Terminal IDs into the database.")
+    
+    with st.expander("Required File Format"):
+        st.write("The file must contain at least these two columns:")
+        st.code("terminal_id, sequence_num")
+
+    uploaded_file = st.file_uploader("Choose a file", type=['csv', 'xlsx'])
+
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df_mig = pd.read_csv(uploaded_file)
+            else:
+                df_mig = pd.read_excel(uploaded_file)
+            
+            st.write("### Preview of Uploaded Data")
+            st.dataframe(df_mig.head(10))
+
+            if st.button("Confirm and Import to MS SQL", type="primary", use_container_width=True):
+                # Clean columns to match DB
+                required = {'terminal_id', 'sequence_num'}
+                if not required.issubset(df_mig.columns):
+                    st.error(f"Missing columns! Required: {required}")
+                else:
+                    with st.spinner("Writing to Database..."):
+                        # Append data to the existing registry
+                        df_mig.to_sql('terminal_registry', engine, if_exists='append', index=False)
+                    st.success(f"Successfully migrated {len(df_mig)} records!")
+                    st.balloons()
+        except Exception as e:
+            st.error(f"Migration Error: {e}")
