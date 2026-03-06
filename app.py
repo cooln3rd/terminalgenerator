@@ -121,7 +121,15 @@ elif page == "Data Migration":
 # --- PAGE: UPLOAD MAPPINGS ---
 elif page == "Upload Mappings":
     st.title(" Upload Client Mappings")
-    st.markdown("###  Upload Instructions\n1. Ensure `terminal_id` matches the registry.\n2. This module will **update** existing records if the TID matches.")
+    
+    # Restored Instruction Block
+    st.warning("""
+    ###  Upload Instructions
+    1. **Terminal ID**: Must match an existing registry entry (e.g., `2ZN10001`).
+    2. **Flexible Headers**: The app accepts variations (e.g., 'Bank', 'Institution', 'Client's TID').
+    3. **Upsert Logic**: If the Terminal ID already exists, the record will be **updated** with new info.
+    4. **Persistence**: Ensure columns for **Institution, MID, and Client TID** are present to see them in the search registry.
+    """)
 
     uploaded_file = st.file_uploader("Upload Client Feedback File", type=['csv', 'xlsx'])
     if uploaded_file:
@@ -184,23 +192,25 @@ elif page == "Registry Search":
             st.error("No record found matching that ID.")
     
     st.divider()
-    st.subheader(" Recently Added Registry Entries")
+    st.subheader(" Recently Mapped Terminals")
     try:
+        # Filtering out terminals that have no mapping data associated
         recent_query = """
             SELECT TOP 10 
-                r.terminal_id AS [Terminal ID], 
-                r.sequence_num AS [Sequence], 
-                m.institution AS [Institution], 
-                m.mid AS [MID], 
-                m.client_tid AS [Client TID]
-            FROM terminal_registry r
-            LEFT JOIN terminal_mappings m ON r.terminal_id = m.terminal_id
-            ORDER BY r.sequence_num DESC
+                terminal_id AS [Terminal ID], 
+                institution AS [Institution], 
+                mid AS [MID], 
+                client_tid AS [Client TID]
+            FROM terminal_mappings
+            WHERE institution IS NOT NULL 
+               OR mid IS NOT NULL 
+               OR client_tid IS NOT NULL
+            ORDER BY terminal_id DESC
         """
         recent_df = pd.read_sql(recent_query, engine)
         if not recent_df.empty:
             st.dataframe(recent_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No records found in the registry.")
+            st.info("No mapped terminals to display.")
     except Exception as e:
-        st.write("Could not load registry preview.")
+        st.write("Could not load mapping preview.")
