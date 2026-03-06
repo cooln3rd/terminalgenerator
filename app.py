@@ -122,51 +122,63 @@ elif page == "Data Migration":
 elif page == "Upload Mappings":
     st.title(" Upload Client Mappings")
     
-    # Restored Instruction Block
     st.warning("""
     ###  Upload Instructions
-    1. **Terminal ID**: Must match an existing registry entry (e.g., `2ZN10001`).
-    2. **Flexible Headers**: The app accepts variations (e.g., 'Bank', 'Institution', 'Client's TID').
-    3. **Upsert Logic**: If the Terminal ID already exists, the record will be **updated** with new info.
-    4. **Persistence**: Ensure columns for **Institution, MID, and Client TID** are present to see them in the search registry.
+    1. **Terminal ID**: Must match an existing registry entry.
+    2. **Required Mapping Info**: Ensure your file contains columns for **Institution**, **Product Type**, **MID**, and **Client TID**.
+    3. **Upsert Logic**: If the Terminal ID exists, the record will be **updated** with the new info.
     """)
 
     uploaded_file = st.file_uploader("Upload Client Feedback File", type=['csv', 'xlsx'])
     if uploaded_file:
         try:
             df_map = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+            
+            # Flexible Header Mapping
             header_map = {
-                'terminal_id': ['terminal_id', 'tid', 'id'],
-                'institution': ['institution', 'bank', 'client'],
-                'product_type': ['product_type', 'product', 'type'],
-                'mid': ['mid', 'merchant_id'],
-                'client_tid': ['client_tid', "client's_tid", 'external_tid']
+                'terminal_id': ['terminal_id', 'tid', 'id', 'terminal_id'],
+                'institution': ['institution', 'bank', 'client', 'institution'],
+                'product_type': ['product_type', 'product', 'type', 'product_type'],
+                'mid': ['mid', 'merchant_id', 'mid'],
+                'client_tid': ['client_tid', "client's_tid", 'external_tid', 'client_tid']
             }
+            
+            # Clean current headers
             df_map.columns = [c.lower().replace(" ", "_").strip() for c in df_map.columns]
+            
             final_mapping = {}
             for std_name, variations in header_map.items():
                 for col in df_map.columns:
                     if col in variations:
                         final_mapping[col] = std_name
+            
             df_map = df_map.rename(columns=final_mapping)
             valid_cols = ['terminal_id', 'institution', 'product_type', 'mid', 'client_tid']
             df_to_save = df_map[[c for c in valid_cols if c in df_map.columns]].copy()
+            
+            st.write("### Review Parsed Data")
             st.dataframe(df_to_save.head())
 
             if st.button("Save/Update Mappings", type="primary", use_container_width=True):
                 with engine.begin() as conn:
+                    # Staging
                     df_to_save.to_sql('temp_mappings', conn, if_exists='replace', index=False)
+                    # MERGE (Upsert)
                     conn.execute(text("""
                         MERGE INTO terminal_mappings AS t
                         USING temp_mappings AS s ON t.terminal_id = s.terminal_id
-                        WHEN MATCHED THEN UPDATE SET t.institution=s.institution, t.product_type=s.product_type, t.mid=s.mid, t.client_tid=s.client_tid
+                        WHEN MATCHED THEN UPDATE SET 
+                            t.institution=s.institution, 
+                            t.product_type=s.product_type, 
+                            t.mid=s.mid, 
+                            t.client_tid=s.client_tid
                         WHEN NOT MATCHED THEN INSERT (terminal_id, institution, product_type, mid, client_tid)
                         VALUES (s.terminal_id, s.institution, s.product_type, s.mid, s.client_tid);
                     """))
                     conn.execute(text("DROP TABLE temp_mappings"))
                 st.success(f"Processed {len(df_to_save)} records!")
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Mapping Upload Failed: {e}")
 
 # --- PAGE: REGISTRY SEARCH ---
 elif page == "Registry Search":
@@ -176,7 +188,7 @@ elif page == "Registry Search":
     if search_val:
         query = text("""
             SELECT r.terminal_id AS [Terminal ID], r.sequence_num AS [Sequence], 
-                   m.institution AS [Institution], m.product_type AS [Product], 
+                   m.institution AS [Institution], m.product_type AS [Product Type], 
                    m.mid AS [MID], m.client_tid AS [Client TID]
             FROM terminal_registry r
             LEFT JOIN terminal_mappings m ON r.terminal_id = m.terminal_id
@@ -194,23 +206,21 @@ elif page == "Registry Search":
     st.divider()
     st.subheader(" Recently Mapped Terminals")
     try:
-        # Filtering out terminals that have no mapping data associated
         recent_query = """
             SELECT TOP 10 
                 terminal_id AS [Terminal ID], 
                 institution AS [Institution], 
+                product_type AS [Product Type],
                 mid AS [MID], 
                 client_tid AS [Client TID]
             FROM terminal_mappings
-            WHERE institution IS NOT NULL 
-               OR mid IS NOT NULL 
-               OR client_tid IS NOT NULL
+            WHERE institution IS NOT NULL OR mid IS NOT NULL OR client_tid IS NOT NULL
             ORDER BY terminal_id DESC
         """
         recent_df = pd.read_sql(recent_query, engine)
         if not recent_df.empty:
             st.dataframe(recent_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No mapped terminals to display.")
+            st.info("No mappings found.")
     except Exception as e:
-        st.write("Could not load mapping preview.")
+        st.write("Could not load preview.")
