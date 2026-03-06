@@ -57,172 +57,150 @@ with st.sidebar:
         with engine.connect() as conn:
             conn.execute(text("""
                 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[terminal_registry]') AND type in (N'U'))
-                BEGIN
-                    CREATE TABLE terminal_registry (
-                        terminal_id VARCHAR(20) PRIMARY KEY,
-                        sequence_num INT NOT NULL
-                    )
-                END
-            """))
-            conn.execute(text("""
+                CREATE TABLE terminal_registry (terminal_id VARCHAR(20) PRIMARY KEY, sequence_num INT NOT NULL)
+                
                 IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[terminal_mappings]') AND type in (N'U'))
-                BEGIN
-                    CREATE TABLE terminal_mappings (
-                        terminal_id VARCHAR(20) PRIMARY KEY,
-                        institution VARCHAR(100),
-                        product_type VARCHAR(50),
-                        mid VARCHAR(50),
-                        client_tid VARCHAR(50)
-                    )
-                END
+                CREATE TABLE terminal_mappings (
+                    terminal_id VARCHAR(20) PRIMARY KEY,
+                    institution VARCHAR(100),
+                    product_type VARCHAR(50),
+                    mid VARCHAR(50),
+                    client_tid VARCHAR(50)
+                )
             """))
             conn.commit()
-
             total = conn.execute(text("SELECT COUNT(*) FROM terminal_registry")).scalar()
             last_seq = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar() or 0
             
         st.metric("Total TIDs in DB", f"{total:,}")
         st.metric("Last Sequence", last_seq)
-        
-        max_cap = (BASE ** SUFFIX_LENGTH)
-        st.write(f"Capacity: { (last_seq/max_cap)*100 :.2f}%")
-        st.progress(min(last_seq / max_cap, 1.0))
     except Exception as e:
-        st.error(f"Database Error: {e}")
+        st.error(f"DB Error: {e}")
 
-# --- PAGE 1: GENERATOR ---
+# --- PAGE: TID GENERATOR ---
 if page == "TID Generator":
     st.title(" Terminal ID Generator")
     st.info(f"**Current Configuration:** Prefix: `{PREFIX}` | Format: `{PREFIX}XXXX` ")
-
     col1, _ = st.columns([2, 3])
     with col1:
-        default_batch = int(os.getenv("BATCH_SIZE", 1000))
-        selected_batch = st.number_input("Enter Batch Size", min_value=1, value=default_batch)
-        generate_btn = st.button("Generate and Save Batch", type="primary", use_container_width=True)
-
-    if generate_btn:
-        try:
-            with engine.connect() as conn:
-                res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
-                current_id = res if res is not None else 0
-
-            new_rows = []
-            progress_bar = st.progress(0)
-            for i in range(selected_batch):
-                current_id += 1
-                if current_id > (BASE ** SUFFIX_LENGTH) - 1:
-                    st.error("STOP: Maximum capacity reached!")
-                    break
-                tid = f"{PREFIX}{int_to_base36_padded(current_id)}"
-                new_rows.append({"terminal_id": tid, "sequence_num": current_id})
-                if i % 1000 == 0:
-                    progress_bar.progress(i / selected_batch)
-
-            if new_rows:
+        selected_batch = st.number_input("Enter Batch Size", min_value=1, value=1000)
+        if st.button("Generate and Save Batch", type="primary", use_container_width=True):
+            try:
+                with engine.connect() as conn:
+                    res = conn.execute(text("SELECT MAX(sequence_num) FROM terminal_registry")).scalar()
+                    current_id = res if res is not None else 0
+                new_rows = []
+                for i in range(selected_batch):
+                    current_id += 1
+                    tid = f"{PREFIX}{int_to_base36_padded(current_id)}"
+                    new_rows.append({"terminal_id": tid, "sequence_num": current_id})
                 df = pd.DataFrame(new_rows)
                 df.to_sql('terminal_registry', engine, if_exists='append', index=False)
-                st.success(f" Successfully added {len(new_rows)} IDs to MS SQL.")
-                
+                st.success(f"Added {len(new_rows)} IDs.")
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Generated_TIDs')
-                
-                st.download_button(
-                    label=" Download Excel for Client",
-                    data=buffer.getvalue(),
-                    file_name=f"TID_Batch_{current_id}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-                st.dataframe(df.head(100))
-        except Exception as e:
-            st.error(f"Action failed: {e}")
+                    df.to_excel(writer, index=False)
+                st.download_button(" Download Excel", buffer.getvalue(), f"TID_Batch_{current_id}.xlsx", use_container_width=True)
+            except Exception as e:
+                st.error(f"Error: {e}")
 
-# --- PAGE 2: MIGRATION ---
+# --- PAGE: DATA MIGRATION ---
 elif page == "Data Migration":
     st.title(" Data Migration Module")
-    st.write("Upload a file to import existing Terminal IDs into the registry.")
-    
-    uploaded_file = st.file_uploader("Choose a file", type=['csv', 'xlsx'])
-
+    uploaded_file = st.file_uploader("Upload Registry Data", type=['csv', 'xlsx'])
     if uploaded_file:
         try:
             df_mig = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-            st.write("### Preview of Uploaded Data")
             st.dataframe(df_mig.head(10))
-
-            if st.button("Confirm and Import to Registry", type="primary", use_container_width=True):
-                # We only want terminal_id and sequence_num for the Registry table
-                df_to_save = df_mig[['terminal_id', 'sequence_num']].copy()
-                
-                with st.spinner("Writing to Registry..."):
-                    df_to_save.to_sql('terminal_registry', engine, if_exists='append', index=False)
-                st.success(f"Successfully migrated {len(df_to_save)} records!")
-                st.balloons()
+            if st.button("Import to Registry", type="primary", use_container_width=True):
+                df_mig[['terminal_id', 'sequence_num']].to_sql('terminal_registry', engine, if_exists='append', index=False)
+                st.success("Migration complete!")
         except Exception as e:
-            st.error(f"Migration Error: {e}")
+            st.error(f"Error: {e}")
 
-# --- PAGE 3: UPLOAD MAPPINGS ---
+# --- PAGE: UPLOAD MAPPINGS ---
 elif page == "Upload Mappings":
     st.title(" Upload Client Mappings")
-    st.write("Upload the institution feedback file to link TIDs to MIDs.")
+    st.markdown("###  Upload Instructions\n1. Ensure `terminal_id` matches the registry.\n2. This module will **update** existing records if the TID matches.")
 
     uploaded_file = st.file_uploader("Upload Client Feedback File", type=['csv', 'xlsx'])
     if uploaded_file:
         try:
             df_map = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-            
-            # Normalize column names to match DB
+            header_map = {
+                'terminal_id': ['terminal_id', 'tid', 'id'],
+                'institution': ['institution', 'bank', 'client'],
+                'product_type': ['product_type', 'product', 'type'],
+                'mid': ['mid', 'merchant_id'],
+                'client_tid': ['client_tid', "client's_tid", 'external_tid']
+            }
             df_map.columns = [c.lower().replace(" ", "_").strip() for c in df_map.columns]
-            
-            st.write("### Mapping Preview")
-            st.dataframe(df_map.head())
+            final_mapping = {}
+            for std_name, variations in header_map.items():
+                for col in df_map.columns:
+                    if col in variations:
+                        final_mapping[col] = std_name
+            df_map = df_map.rename(columns=final_mapping)
+            valid_cols = ['terminal_id', 'institution', 'product_type', 'mid', 'client_tid']
+            df_to_save = df_map[[c for c in valid_cols if c in df_map.columns]].copy()
+            st.dataframe(df_to_save.head())
 
-            if st.button("Save Client Mappings", type="primary", use_container_width=True):
-                # FIX: Explicitly select ONLY the columns that exist in the terminal_mappings table
-                # This prevents the "Invalid column name 'sequence_num'" error
-                valid_columns = ['terminal_id', 'institution', 'product_type', 'mid', 'client_tid']
-                
-                # Only keep columns that actually exist in the uploaded file and are valid for the DB
-                cols_to_keep = [c for c in valid_columns if c in df_map.columns]
-                df_to_save = df_map[cols_to_keep].copy()
-                
-                with st.spinner("Syncing mappings to SQL Server..."):
-                    df_to_save.to_sql('terminal_mappings', engine, if_exists='append', index=False)
-                st.success(" Client mappings linked successfully!")
+            if st.button("Save/Update Mappings", type="primary", use_container_width=True):
+                with engine.begin() as conn:
+                    df_to_save.to_sql('temp_mappings', conn, if_exists='replace', index=False)
+                    conn.execute(text("""
+                        MERGE INTO terminal_mappings AS t
+                        USING temp_mappings AS s ON t.terminal_id = s.terminal_id
+                        WHEN MATCHED THEN UPDATE SET t.institution=s.institution, t.product_type=s.product_type, t.mid=s.mid, t.client_tid=s.client_tid
+                        WHEN NOT MATCHED THEN INSERT (terminal_id, institution, product_type, mid, client_tid)
+                        VALUES (s.terminal_id, s.institution, s.product_type, s.mid, s.client_tid);
+                    """))
+                    conn.execute(text("DROP TABLE temp_mappings"))
+                st.success(f"Processed {len(df_to_save)} records!")
         except Exception as e:
-            st.error(f"Mapping Upload Failed: {e}")
+            st.error(f"Error: {e}")
 
-# --- PAGE 4: REGISTRY SEARCH ---
+# --- PAGE: REGISTRY SEARCH ---
 elif page == "Registry Search":
     st.title(" Registry & Mapping Lookup")
-    search_tid = st.text_input("Enter Terminal ID (TID) to find details:").strip()
+    search_val = st.text_input("Enter Terminal ID or Client TID:").strip()
     
-    if search_tid:
+    if search_val:
         query = text("""
-            SELECT r.terminal_id, r.sequence_num, m.institution, m.product_type, m.mid, m.client_tid
+            SELECT r.terminal_id AS [Terminal ID], r.sequence_num AS [Sequence], 
+                   m.institution AS [Institution], m.product_type AS [Product], 
+                   m.mid AS [MID], m.client_tid AS [Client TID]
             FROM terminal_registry r
             LEFT JOIN terminal_mappings m ON r.terminal_id = m.terminal_id
-            WHERE r.terminal_id = :tid
+            WHERE r.terminal_id = :val OR m.client_tid = :val
         """)
         with engine.connect() as conn:
-            result = conn.execute(query, {"tid": search_tid}).fetchone()
+            result_df = pd.read_sql(query, conn, params={"val": search_val})
             
-        if result:
-            res_col1, res_col2 = st.columns(2)
-            with res_col1:
-                st.subheader(" System Registry")
-                st.write(f"**ID:** {result[0]}")
-                st.write(f"**Sequence:** {result[1]}")
-            with res_col2:
-                st.subheader(" Client Mapping")
-                if result[2]:
-                    st.write(f"**Institution:** {result[2]}")
-                    st.write(f"**Product:** {result[3]}")
-                    st.write(f"**MID:** {result[4]}")
-                    st.write(f"**Client TID:** {result[5]}")
-                else:
-                    st.info("No client mapping data found for this ID.")
+        if not result_df.empty:
+            st.subheader(" Search Result")
+            st.table(result_df)
         else:
-            st.error("Terminal ID not found in registry.")
+            st.error("No record found matching that ID.")
+    
+    st.divider()
+    st.subheader(" Recently Added Registry Entries")
+    try:
+        recent_query = """
+            SELECT TOP 10 
+                r.terminal_id AS [Terminal ID], 
+                r.sequence_num AS [Sequence], 
+                m.institution AS [Institution], 
+                m.mid AS [MID], 
+                m.client_tid AS [Client TID]
+            FROM terminal_registry r
+            LEFT JOIN terminal_mappings m ON r.terminal_id = m.terminal_id
+            ORDER BY r.sequence_num DESC
+        """
+        recent_df = pd.read_sql(recent_query, engine)
+        if not recent_df.empty:
+            st.dataframe(recent_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No records found in the registry.")
+    except Exception as e:
+        st.write("Could not load registry preview.")
